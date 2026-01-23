@@ -104,8 +104,8 @@ def remove_empty_safe(path: Path, log_file: Path, notify):
 
 # --- Main Processing Logic ---
 
-def process_duplicates(assorted: Path, main_dir: Path, bin_dir: Path, log_file: Path,
-                       update_progress, update_status, is_paused, is_stopped, pump_events):
+def process_duplicates(assorted: Path, checkpoint: Path, bin_dir: Path, log_file: Path,
+                       update_progress, update_status, pump_events):
     t_all = time.time()
 
     # Error/action counters
@@ -116,99 +116,64 @@ def process_duplicates(assorted: Path, main_dir: Path, bin_dir: Path, log_file: 
     cleanup_errors = 0
     moved = 0
     kept = 0
-    stopped = False
 
-    def wait_if_paused():
-        # Waiting while pause is active, without blocking the UI
-        showed = False
-        while is_paused() and not is_stopped():
-            if not showed:
-                update_status("⏸ Pause active. Waiting for continuation...")
-                showed = True
-            pump_events()
-            time.sleep(0.05)
 
     try:
-        # Early stop check
-        if is_stopped():
-            stopped = True
 
         # 1) PREPARE: Main folder scanning
-        if not stopped:
-            update_status("PREPARE: Main folder scanning...")
-            wait_if_paused()
-            if is_stopped():
-                stopped = True
-            if not stopped:
-                try:
-                    main_files = [p for p in main_dir.rglob('*') if p.is_file()]
-                    update_status(f"PREPARE: Found {len(main_files)} files in main folder")
-                except Exception as e:
-                    update_status(f"PREPARE ERROR: Scan failure main_dir | {type(e).__name__}: {e}")
-                    main_files = []
+        update_status("PREPARE: Main folder scanning...")
+        try:
+            main_files = [p for p in checkpoint.rglob('*') if p.is_file()]
+            update_status(f"PREPARE: Found {len(main_files)} files in main folder")
+        except Exception as e:
+            update_status(f"PREPARE ERROR: Scan failure checkpoint | {type(e).__name__}: {e}")
+            main_files = []
 
         # 2) PREPARE: Main folder file hashing (safe)
         hash_to_paths: dict[str, list[Path]] = {}
-        if not stopped:
-            update_status("PREPARE: SHA-256 calculation for main folder files...")
-            t_hash_main = time.time()
-            if main_files:
-                chunk = max(100, max(len(main_files) // 20, 1))
-                with concurrent.futures.ProcessPoolExecutor() as exe:
-                    for i, (pstr, h, err) in enumerate(exe.map(safe_sha256_for_pool, map(str, main_files)), 1):
-                        wait_if_paused()
-                        if is_stopped():
-                            stopped = True
-                            break
-                        p = Path(pstr)
-                        if h is not None:
-                            hash_to_paths.setdefault(h, []).append(p)
-                        else:
-                            prep_hash_errors += 1
-                            msg = f"PREPARE ERROR: Hashing failed: {p} | {err}"
-                            update_status(msg)
-                            write_log(log_file, msg)
-                        if i % chunk == 0 or i == len(main_files):
-                            elapsed = time.time() - t_hash_main
-                            rate = i / elapsed if elapsed > 0 else 0
-                            update_status(f"PREPARE: Hashed {i}/{len(main_files)} "
-                                          f"({rate:.1f} files/sec.) | Errors: {prep_hash_errors}")
-            if not stopped:
-                update_status(f"PREPARE: Main folder hashing completed | Unique hashes: {len(hash_to_paths)} "
-                              f"| Duration: {human_seconds(time.time() - t_hash_main)} | Errors: {prep_hash_errors}")
+        update_status("PREPARE: SHA-256 calculation for main folder files...")
+        t_hash_main = time.time()
+        if main_files:
+            chunk = max(100, max(len(main_files) // 20, 1))
+            with concurrent.futures.ProcessPoolExecutor() as exe:
+                for i, (pstr, h, err) in enumerate(exe.map(safe_sha256_for_pool, map(str, main_files)), 1):
+                    p = Path(pstr)
+                    if h is not None:
+                        hash_to_paths.setdefault(h, []).append(p)
+                    else:
+                        prep_hash_errors += 1
+                        msg = f"PREPARE ERROR: Hashing failed: {p} | {err}"
+                        update_status(msg)
+                        write_log(log_file, msg)
+                    if i % chunk == 0 or i == len(main_files):
+                        elapsed = time.time() - t_hash_main
+                        rate = i / elapsed if elapsed > 0 else 0
+                        update_status(f"PREPARE: Hashed {i}/{len(main_files)} "
+                                      f"({rate:.1f} files/sec.) | Errors: {prep_hash_errors}")
+        update_status(f"PREPARE: Main folder hashing completed | Unique hashes: {len(hash_to_paths)} "
+                      f"| Duration: {human_seconds(time.time() - t_hash_main)} | Errors: {prep_hash_errors}")
 
         # 3) RUN: Scan assorted
-        if not stopped:
-            update_status("RUN: Assorted folder scanning...")
-            wait_if_paused()
-            if is_stopped():
-                stopped = True
-            if not stopped:
-                try:
-                    assorted_files = [p for p in assorted.rglob('*') if p.is_file()]
-                except Exception as e:
-                    update_status(f"RUN ERROR: Assorted scan failure | {type(e).__name__}: {e}")
-                    assorted_files = []
-                total = len(assorted_files)
-                update_status(f"RUN: Found {total} files to check")
-                update_progress(0, total)
-            else:
-                assorted_files, total = [], 0
-        else:
-            assorted_files, total = [], 0
+        update_status("RUN: Assorted folder scanning...")
+        try:
+            assorted_files = [p for p in assorted.rglob('*') if p.is_file()]
+        except Exception as e:
+            update_status(f"RUN ERROR: Assorted scan failure | {type(e).__name__}: {e}")
+            assorted_files = []
+        total = len(assorted_files)
+        update_status(f"RUN: Found {total} files to check")
+        update_progress(0, total)
+
+
 
         # 4) RUN: Hash & compare & move (safe)
-        if not stopped and total > 0:
+        if total > 0:
             done = 0
             t_run = time.time()
             chunk2 = max(100, max(total // 20, 1))
             update_status("RUN: Start processing...")
             with concurrent.futures.ProcessPoolExecutor() as exe:
                 for idx, (pstr, file_hash, err) in enumerate(exe.map(safe_sha256_for_pool, map(str, assorted_files)), 1):
-                    wait_if_paused()
-                    if is_stopped():
-                        stopped = True
-                        break
                     src = Path(pstr)
                     if file_hash is None:
                         run_hash_errors += 1
@@ -256,18 +221,7 @@ def process_duplicates(assorted: Path, main_dir: Path, bin_dir: Path, log_file: 
                             f"| Rate: {rate:.1f}/s | Elapsed: {human_seconds(elapsed)} | ETA: {human_seconds(eta)}"
                         )
 
-        # 5) CLEANUP or Stop
-        if stopped:
-            update_status("🛑 Stop execution at user request. Bypass cleanup.")
-            total_time = human_seconds(time.time() - t_all)
-            update_status(
-                f"FINISH: Stopped | Moved: {moved} | Kept: {kept} "
-                f"| Prep hash errors: {prep_hash_errors} | Run hash errors: {run_hash_errors} "
-                f"| Move errors: {move_errors} | Mkdir errors: {mkdir_errors} "
-                f"| Total time: {total_time}"
-            )
-            messagebox.showinfo("Info", "Stopped by user.")
-            return
+        # 5) CLEANUP 
 
         update_status("CLEANUP: Remove empty folders...")
         cleanup_errors += remove_empty_safe(assorted, log_file, update_status)
@@ -298,12 +252,10 @@ class DistillFilesApp(tk.Tk):
         self.resizable(True, True)
 
         # Control flags
-        self.pause_requested = False
-        self.stop_requested = False
 
         # Folder selections
         self.assorted = tk.StringVar()
-        self.main_dir  = tk.StringVar()
+        self.checkpoint  = tk.StringVar()
         self.recycle   = tk.StringVar()
 
         def make_row(label, var, row):
@@ -313,8 +265,8 @@ class DistillFilesApp(tk.Tk):
                       command=lambda v=var,l=label: v.set(str(select_folder(l, v.get() or os.getcwd())))) \
                 .grid(column=3, row=row, padx=4)
 
-        make_row("Assorted Folder:", self.assorted, 0)
-        make_row("Main Folder:",     self.main_dir,  1)
+        make_row("Assorted:", self.assorted, 0)
+        make_row("CheckPoint:",     self.checkpoint,  1)
         make_row("Recycle Bin:",     self.recycle,   2)
 
         # Progress bar
@@ -324,15 +276,10 @@ class DistillFilesApp(tk.Tk):
         # Fixed button width
         btn_width = 22
         
-        # Control buttons: Run / Pause / Stop        
+        # Control buttons: Run  
         self.btn_run = tk.Button(self, text="🧪 Distill Files", command=self.start, width=btn_width)
-        self.btn_run.grid(column=0, row=4, columnspan=1, pady=4, padx=8, sticky="ns")
+        self.btn_run.grid(column=1, row=4, columnspan=1, pady=4, padx=8, sticky="ns")
 
-        self.btn_pause = tk.Button(self, text="⏸️ Pause", command=self.toggle_pause, state="disabled", width=btn_width)
-        self.btn_pause.grid(column=1, row=4, columnspan=1, pady=4, padx=8, sticky="ns")
-
-        self.btn_stop = tk.Button(self, text="🛑 Stop", command=self.request_stop, state="disabled", width=btn_width)
-        self.btn_stop.grid(column=2, row=4, columnspan=1, pady=4, padx=8, sticky="ns")
 
         # Spacer for alignment
         tk.Label(self, text="").grid(column=3, row=4, pady=4, padx=8, sticky="we")
@@ -353,18 +300,6 @@ class DistillFilesApp(tk.Tk):
         self.console.configure(state="disabled")
         self.update_idletasks()
 
-    def toggle_pause(self):
-        self.pause_requested = not self.pause_requested
-        label = "Resume" if self.pause_requested else "Pause"
-        self.btn_pause.configure(text=label)
-        self.log("⏸ Pause activated" if self.pause_requested else "▶ Resume")
-
-    def request_stop(self):
-        self.stop_requested = True
-        # If it was paused, we allow it to exit the pause loop
-        self.pause_requested = False
-        self.btn_pause.configure(text="Pause")
-        self.log("🛑 Stop requested by user.")
 
     def pump_events(self):
         # Processing pending events to keep the UI responsive
@@ -373,30 +308,19 @@ class DistillFilesApp(tk.Tk):
         except tk.TclError:
             pass
 
-    def is_paused(self) -> bool:
-        return self.pause_requested
-
-    def is_stopped(self) -> bool:
-        return self.stop_requested
 
     def on_processing_started(self):
         self.btn_run.configure(state="disabled")
-        self.btn_pause.configure(state="normal", text="Pause")
-        self.btn_stop.configure(state="normal")
-        self.pause_requested = False
-        self.stop_requested = False
 
     def on_processing_done(self):
         self.btn_run.configure(state="normal")
-        self.btn_pause.configure(state="disabled", text="Pause")
-        self.btn_stop.configure(state="disabled")
 
     def start(self):
         self.progress["value"] = 0
         self.update_idletasks()
 
         u = Path(self.assorted.get())
-        v = Path(self.main_dir.get())
+        v = Path(self.checkpoint.get())
         r = Path(self.recycle.get())
         ts_log_name = datetime.now().strftime("%Y%m%d%H%M%S_") + "move-log.txt"
         log = Path(__file__).parent / ts_log_name
@@ -414,13 +338,11 @@ class DistillFilesApp(tk.Tk):
             try:
                 process_duplicates(
                     assorted=u,
-                    main_dir=v,
+                    checkpoint=v,
                     bin_dir=r,
                     log_file=log,
                     update_progress=update_progress,
                     update_status=self.log,
-                    is_paused=self.is_paused,
-                    is_stopped=self.is_stopped,
                     pump_events=self.pump_events,
                 )
             finally:
