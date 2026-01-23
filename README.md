@@ -9,13 +9,13 @@ After completing the process, we have two sets of files, one in the working fold
 The files that are left in the working folder either do not exist anywhere in the reference folder (checkpoint), or are different from the corresponding files in the reference folder
 
 This means:
-==**from A evaporate C to B distilling A'**==
+**from A evaporate C to B distilling A'**
 ```
 A-C=B+A'
 ```
 
 That is:
-If we consider that we have two data sets (organized in a tree form) A and C, ==**we can define an operation**== between them called distill as follows:
+If we consider that we have two data sets (organized in a tree form) A and C, **we can define an operation** between them called distill as follows:
 ```
 A-C=B+A'
 ```
